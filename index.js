@@ -1,9 +1,10 @@
 /**
  * Host half of the @local/screen-mouse-control bundle.
  *
- * Registers agent tools that capture the screen and drive the mouse through a
- * small PowerShell engine (powershell/control.ps1) so the agent can literally
- * look at the screen and operate the computer on Windows.
+ * Registers agent tools that capture the screen, read it (OCR), and drive the
+ * mouse through small PowerShell engines (powershell/control.ps1 for capture +
+ * mouse, powershell/vision.ps1 for capture + OCR + click) so the agent can look
+ * at the screen and operate the computer on Windows.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -16,6 +17,7 @@ const execFileAsync = promisify(execFile);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTROL_PS1 = join(HERE, 'powershell', 'control.ps1');
+const VISION_PS1 = join(HERE, 'powershell', 'vision.ps1');
 
 export const inject = ['tools', 'attachments'];
 
@@ -55,8 +57,8 @@ function parseResult(stdout, stderr) {
   return parsed;
 }
 
-async function runPowerShell(env, signal) {
-  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', CONTROL_PS1];
+async function runPowerShell(ps1Path, env, signal) {
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1Path];
   let lastError;
   for (const ps of findPowerShellCandidates()) {
     try {
@@ -99,6 +101,30 @@ function textOutput(schema) {
   };
 }
 
+const regionSchema = {
+  type: 'object',
+  description: 'Optional rectangular region in screen pixels. Omit for the full primary screen.',
+  additionalProperties: false,
+  required: ['x', 'y', 'width', 'height'],
+  properties: {
+    x: { type: 'integer', description: 'Left edge, in screen pixels.' },
+    y: { type: 'integer', description: 'Top edge, in screen pixels.' },
+    width: { type: 'integer', description: 'Region width in pixels.' },
+    height: { type: 'integer', description: 'Region height in pixels.' },
+  },
+};
+
+function applyRegionEnv(args, env) {
+  if (args.region) {
+    env.SM_REGION = JSON.stringify({
+      x: toInt(args.region.x, 'region.x'),
+      y: toInt(args.region.y, 'region.y'),
+      width: toInt(args.region.width, 'region.width'),
+      height: toInt(args.region.height, 'region.height'),
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -113,18 +139,7 @@ function screenCaptureTool(ctx) {
       type: 'object',
       additionalProperties: false,
       properties: {
-        region: {
-          type: 'object',
-          description: 'Optional rectangular region to capture, in screen pixels. Omit to capture the whole primary screen.',
-          additionalProperties: false,
-          required: ['x', 'y', 'width', 'height'],
-          properties: {
-            x: { type: 'integer', description: 'Left edge, in screen pixels.' },
-            y: { type: 'integer', description: 'Top edge, in screen pixels.' },
-            width: { type: 'integer', description: 'Region width in pixels.' },
-            height: { type: 'integer', description: 'Region height in pixels.' },
-          },
-        },
+        region: regionSchema,
         all_screens: {
           type: 'boolean',
           description: 'Capture the full virtual desktop spanning all monitors. Defaults to false (primary screen only).',
@@ -199,16 +214,9 @@ function screenCaptureTool(ctx) {
         SM_JPEG_QUALITY: '85',
         SM_ALL: allScreens ? '1' : '0',
       };
-      if (args.region) {
-        env.SM_REGION = JSON.stringify({
-          x: toInt(args.region.x, 'region.x'),
-          y: toInt(args.region.y, 'region.y'),
-          width: toInt(args.region.width, 'region.width'),
-          height: toInt(args.region.height, 'region.height'),
-        });
-      }
+      applyRegionEnv(args, env);
 
-      const result = await runPowerShell(env, exec.signal);
+      const result = await runPowerShell(CONTROL_PS1, env, exec.signal);
 
       const attach = async (path, mediaType, name) => {
         const bytes = await readFile(path);
@@ -234,7 +242,7 @@ function screenCaptureTool(ctx) {
         if (finalMediaType === 'image/png') {
           const jpegPath = finalPath.replace(/\.png$/i, '.jpg');
           const jpegEnv = { ...env, SM_FORMAT: 'jpeg', SM_OUT: jpegPath, SM_MAX_DIM: String(Math.min(maxDim, 1440)) };
-          const jpegResult = await runPowerShell(jpegEnv, exec.signal);
+          const jpegResult = await runPowerShell(CONTROL_PS1, jpegEnv, exec.signal);
           const a = await attach(jpegPath, 'image/jpeg', `screenshot-${Date.now()}.jpg`);
           attachment = a.ref;
           finalPath = jpegResult.path || jpegPath;
@@ -259,6 +267,85 @@ function screenCaptureTool(ctx) {
   };
 }
 
+function screenOcrTool() {
+  return {
+    name: 'screen_ocr',
+    description:
+      'Capture the screen and OCR it in one step. Returns the recognized text plus every word\'s ' +
+      'clickable center (cx, cy) in screen pixel coordinates. Use this instead of screen_capture + a separate OCR pass to read the screen quickly.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        region: regionSchema,
+        all_screens: { type: 'boolean', description: 'Read the full virtual desktop. Default false (primary screen).', default: false },
+        max_dimension: {
+          type: 'integer',
+          description: 'Cap the OCR resolution (longest side). Lower is faster; coordinates are still returned in screen pixels. Default 1920.',
+          default: 1920,
+        },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(_args, value) {
+        const blocks = [];
+        if (value && value.text) blocks.push(textBlock(value.text));
+        if (value && Array.isArray(value.words) && value.words.length) {
+          blocks.push(textBlock(value.words.map((w) => `${w.text}@${w.cx},${w.cy}`).join(' ')));
+        }
+        return blocks.length ? blocks : [textBlock(JSON.stringify(value))];
+      },
+    },
+    async execute(args, exec) {
+      const env = {
+        SM_ACTION: 'ocr',
+        SM_MAX_DIM: String(toInt(args.max_dimension, 'max_dimension', 1920)),
+        SM_ALL: args.all_screens ? '1' : '0',
+      };
+      applyRegionEnv(args, env);
+      return runPowerShell(VISION_PS1, env, exec.signal);
+    },
+  };
+}
+
+function clickTextTool() {
+  return {
+    name: 'click_text',
+    description:
+      'Capture the screen, OCR it, find the target text, and click its center — all in one step. ' +
+      'Optionally offset the click (e.g. to hit an icon a few pixels above/below some text) and double-click.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text'],
+      properties: {
+        text: { type: 'string', description: 'Text to find and click (case-insensitive substring; may span several words).' },
+        offset_x: { type: 'integer', description: 'Click offset in screen pixels from the matched text center. Default 0.', default: 0 },
+        offset_y: { type: 'integer', description: 'Click offset in screen pixels from the matched text center. Default 0.', default: 0 },
+        button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Default left.', default: 'left' },
+        double: { type: 'boolean', description: 'Double click. Default false.', default: false },
+        region: regionSchema,
+        max_dimension: { type: 'integer', description: 'OCR resolution cap. Default 1920.', default: 1920 },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      const env = {
+        SM_ACTION: 'click_text',
+        SM_TARGET: String(args.text),
+        SM_OFFSET_X: String(toInt(args.offset_x, 'offset_x', 0)),
+        SM_OFFSET_Y: String(toInt(args.offset_y, 'offset_y', 0)),
+        SM_BUTTON: args.button === 'right' ? 'right' : args.button === 'middle' ? 'middle' : 'left',
+        SM_DOUBLE: args.double ? '1' : '0',
+        SM_MAX_DIM: String(toInt(args.max_dimension, 'max_dimension', 1920)),
+      };
+      applyRegionEnv(args, env);
+      return runPowerShell(VISION_PS1, env, exec.signal);
+    },
+  };
+}
+
 function computerInfoTool() {
   return {
     name: 'computer_info',
@@ -275,7 +362,7 @@ function computerInfoTool() {
       },
     }),
     async execute(_args, exec) {
-      return runPowerShell({ SM_ACTION: 'info' }, exec.signal);
+      return runPowerShell(CONTROL_PS1, { SM_ACTION: 'info' }, exec.signal);
     },
   };
 }
@@ -303,7 +390,7 @@ function mouseMoveTool() {
         SM_Y: String(toInt(args.y, 'y')),
         SM_DURATION_MS: String(toInt(args.duration_ms, 'duration_ms', 0)),
       };
-      return runPowerShell(env, exec.signal);
+      return runPowerShell(CONTROL_PS1, env, exec.signal);
     },
   };
 }
@@ -336,7 +423,7 @@ function mouseClickTool() {
         env.SM_X = String(toInt(args.x, 'x', 0));
         env.SM_Y = String(toInt(args.y, 'y', 0));
       }
-      return runPowerShell(env, exec.signal);
+      return runPowerShell(CONTROL_PS1, env, exec.signal);
     },
   };
 }
@@ -369,7 +456,7 @@ function mouseDragTool() {
         SM_BUTTON: args.button === 'right' ? 'right' : args.button === 'middle' ? 'middle' : 'left',
         SM_DURATION_MS: String(toInt(args.duration_ms, 'duration_ms', 200)),
       };
-      return runPowerShell(env, exec.signal);
+      return runPowerShell(CONTROL_PS1, env, exec.signal);
     },
   };
 }
@@ -401,7 +488,7 @@ function mouseScrollTool() {
         env.SM_X = String(toInt(args.x, 'x', 0));
         env.SM_Y = String(toInt(args.y, 'y', 0));
       }
-      return runPowerShell(env, exec.signal);
+      return runPowerShell(CONTROL_PS1, env, exec.signal);
     },
   };
 }
@@ -413,6 +500,8 @@ function mouseScrollTool() {
 export function apply(ctx) {
   const disposers = [
     ctx.tools.register(screenCaptureTool(ctx)),
+    ctx.tools.register(screenOcrTool()),
+    ctx.tools.register(clickTextTool()),
     ctx.tools.register(computerInfoTool()),
     ctx.tools.register(mouseMoveTool()),
     ctx.tools.register(mouseClickTool()),
