@@ -1,0 +1,4 @@
+- insert:
+    - id: screen-mouse-control
+      name: '@local/screen-mouse-control'
+      config: {}
