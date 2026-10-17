@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTROL_PS1 = join(HERE, 'powershell', 'control.ps1');
 const VISION_PS1 = join(HERE, 'powershell', 'vision.ps1');
+const SHORTCUTS_PS1 = join(HERE, 'powershell', 'shortcuts.ps1');
 
 export const inject = ['tools', 'attachments'];
 
@@ -71,6 +72,29 @@ async function runPowerShell(ps1Path, env, signal) {
         env: { ...process.env, ...env },
       });
       return parseResult(stdout, stderr);
+    } catch (err) {
+      lastError = err;
+      if (signal && signal.aborted) throw err;
+      if (err && err.code === 'ENOENT') continue; // try next candidate
+      throw err;
+    }
+  }
+  throw lastError || new Error('powershell.exe not found on this system');
+}
+
+async function runPowerShellCommand(command, timeoutMs, signal) {
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command];
+  let lastError;
+  for (const ps of findPowerShellCandidates()) {
+    try {
+      const { stdout, stderr } = await execFileAsync(ps, args, {
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        windowsHide: true,
+        timeout: timeoutMs,
+        signal,
+      });
+      return { stdout: String(stdout || ''), stderr: String(stderr || '') };
     } catch (err) {
       lastError = err;
       if (signal && signal.aborted) throw err;
@@ -493,6 +517,151 @@ function mouseScrollTool() {
   };
 }
 
+function runPowerShellTool() {
+  return {
+    name: 'run_powershell',
+    description:
+      'Run an arbitrary Windows PowerShell command (as the current user, outside the DSH sandbox) and return its stdout. ' +
+      'Use it for any system task not covered by the dedicated screen/mouse/keyboard/shortcut tools.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['command'],
+      properties: {
+        command: { type: 'string', description: 'PowerShell command to execute.' },
+        timeout_ms: { type: 'integer', description: 'Timeout in milliseconds. Default 30000.', default: 30000 },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(_args, value) {
+        const blocks = [];
+        if (value && value.stdout) blocks.push(textBlock(value.stdout));
+        if (value && value.stderr) blocks.push(textBlock('STDERR:\n' + value.stderr));
+        if (!blocks.length) blocks.push(textBlock(JSON.stringify(value)));
+        return blocks;
+      },
+    },
+    async execute(args, exec) {
+      const { stdout, stderr } = await runPowerShellCommand(
+        String(args.command),
+        toInt(args.timeout_ms, 'timeout_ms', 30000),
+        exec.signal,
+      );
+      return { stdout, stderr };
+    },
+  };
+}
+
+function computerActionTool() {
+  return {
+    name: 'computer_action',
+    description:
+      'Run a pre-stored common Windows action: open an app/URL/file, lock/sleep/hibernate/restart/shutdown, change volume, show desktop, or empty the recycle bin.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action'],
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'open', 'open_explorer', 'open_settings', 'open_task_manager', 'open_notepad',
+            'open_calculator', 'open_cmd', 'open_powershell', 'lock', 'sleep', 'hibernate',
+            'restart', 'shutdown', 'volume_up', 'volume_down', 'volume_mute',
+            'show_desktop', 'empty_recycle_bin',
+          ],
+          description: 'The pre-stored action to run.',
+        },
+        target: { type: 'string', description: 'For action "open": the URL, file path, or executable to open.' },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      const env = { SM_ACTION: args.action };
+      if (args.target !== undefined) env.SM_TARGET = String(args.target);
+      return runPowerShell(SHORTCUTS_PS1, env, exec.signal);
+    },
+  };
+}
+
+function typeTextTool() {
+  return {
+    name: 'type_text',
+    description:
+      'Type text into the currently focused window using the keyboard. ASCII-safe. For Chinese/non-ASCII text, use clipboard_set then press_keys("^v") to paste instead.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text'],
+      properties: {
+        text: { type: 'string', description: 'Text to type into the focused field.' },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      return runPowerShell(SHORTCUTS_PS1, { SM_ACTION: 'type_text', SM_TEXT: String(args.text) }, exec.signal);
+    },
+  };
+}
+
+function pressKeysTool() {
+  return {
+    name: 'press_keys',
+    description:
+      'Send a keyboard shortcut or key combination to the focused window. SendKeys syntax: ^ for Ctrl, + for Shift, % for Alt, and {ENTER}, {TAB}, {ESC}, {UP}, {DOWN}, {LEFT}, {RIGHT}, {F1}-{F12}, {DELETE}, {BACKSPACE}, etc. Examples: "^c" (copy), "^v" (paste), "^a" (select all), "%{F4}" (close window), "{ENTER}".',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['keys'],
+      properties: {
+        keys: { type: 'string', description: 'Key combination in SendKeys syntax.' },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      return runPowerShell(SHORTCUTS_PS1, { SM_ACTION: 'press_keys', SM_KEYS: String(args.keys) }, exec.signal);
+    },
+  };
+}
+
+function clipboardSetTool() {
+  return {
+    name: 'clipboard_set',
+    description: 'Set the Windows clipboard to the given text (useful for pasting non-ASCII text via press_keys("^v")).',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text'],
+      properties: {
+        text: { type: 'string', description: 'Text to place on the clipboard.' },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      return runPowerShell(SHORTCUTS_PS1, { SM_ACTION: 'clipboard_set', SM_TEXT: String(args.text) }, exec.signal);
+    },
+  };
+}
+
+function clipboardGetTool() {
+  return {
+    name: 'clipboard_get',
+    description: 'Read the current Windows clipboard text.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(_args, value) {
+        if (value && value.ok) return [textBlock(value.text)];
+        return [textBlock(JSON.stringify(value))];
+      },
+    },
+    async execute(_args, exec) {
+      return runPowerShell(SHORTCUTS_PS1, { SM_ACTION: 'clipboard_get' }, exec.signal);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // apply
 // ---------------------------------------------------------------------------
@@ -507,6 +676,12 @@ export function apply(ctx) {
     ctx.tools.register(mouseClickTool()),
     ctx.tools.register(mouseDragTool()),
     ctx.tools.register(mouseScrollTool()),
+    ctx.tools.register(runPowerShellTool()),
+    ctx.tools.register(computerActionTool()),
+    ctx.tools.register(typeTextTool()),
+    ctx.tools.register(pressKeysTool()),
+    ctx.tools.register(clipboardSetTool()),
+    ctx.tools.register(clipboardGetTool()),
   ];
   return () => {
     for (const dispose of disposers) dispose();

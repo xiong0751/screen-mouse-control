@@ -8,7 +8,7 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "powershell/control.ps1", "powershell/vision.ps1"],
+  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "powershell/control.ps1", "powershell/vision.ps1", "powershell/shortcuts.ps1"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" }
   }
