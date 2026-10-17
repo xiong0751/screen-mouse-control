@@ -91,6 +91,62 @@ try {
       Send-Keys $k
       Write-Result @{ ok = $true; keys = $k }
     }
+    'open_screensaver' {
+      $scr = $null
+      foreach ($c in @(
+        "$env:SystemRoot\System32\Bubbles.scr",
+        "$env:SystemRoot\System32\Ribbons.scr",
+        "$env:SystemRoot\System32\Mystify.scr",
+        "$env:SystemRoot\System32\scrnsave.scr"
+      )) {
+        if (Test-Path $c) { $scr = $c; break }
+      }
+      if (-not $scr) { throw 'No screensaver (.scr) found' }
+      Start-Process $scr -ArgumentList '/s'
+      Write-Result @{ ok = $true; scr = $scr }
+    }
+    'switch_display' {
+      Add-Win32Key
+      [KWin32]::keybd_event(0x5B, 0, 0, 0)   # Win
+      [KWin32]::keybd_event(0x50, 0, 0, 0)   # P
+      [KWin32]::keybd_event(0x50, 0, 2, 0)
+      [KWin32]::keybd_event(0x5B, 0, 2, 0)
+      Write-Result @{ ok = $true }
+    }
+    'toggle_wifi' {
+      $adapter = Get-NetAdapter -Name 'Wi-Fi' -ErrorAction SilentlyContinue
+      if (-not $adapter) {
+        $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\.11' } | Select-Object -First 1
+      }
+      if (-not $adapter) { throw 'No wireless adapter found' }
+      if ($adapter.Status -eq 'Up') {
+        Disable-NetAdapter -Name $adapter.Name -Confirm:$false
+        Write-Result @{ ok = $true; adapter = $adapter.Name; state = 'disabled' }
+      } else {
+        Enable-NetAdapter -Name $adapter.Name -Confirm:$false
+        Write-Result @{ ok = $true; adapter = $adapter.Name; state = 'enabled' }
+      }
+    }
+    'toggle_bluetooth' {
+      $devices = Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue
+      if (-not $devices) { throw 'No Bluetooth devices found' }
+      $toggled = $false
+      foreach ($d in $devices) {
+        if ($d.Status -eq 'OK') { Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false; $toggled = $true }
+        elseif ($d.Status -eq 'Error') { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false; $toggled = $true }
+      }
+      Write-Result @{ ok = $true; toggled = $toggled }
+    }
+    'set_brightness' {
+      $level = $env:SM_BRIGHTNESS
+      if ($null -eq $level -or $level -eq '') { throw 'SM_BRIGHTNESS required (0-100)' }
+      $level = [int]$level
+      if ($level -lt 0 -or $level -gt 100) { throw 'SM_BRIGHTNESS must be 0-100' }
+      $m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods -ErrorAction Stop
+      if (-not $m) { throw 'Brightness control not supported on this monitor' }
+      $m | ForEach-Object { $_.WmiSetBrightness(1, [byte]$level) }
+      Write-Result @{ ok = $true; brightness = $level }
+    }
     default { throw "Unknown action: $action" }
   }
 } catch {

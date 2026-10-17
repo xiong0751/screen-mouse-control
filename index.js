@@ -569,17 +569,20 @@ function computerActionTool() {
             'open', 'open_explorer', 'open_settings', 'open_task_manager', 'open_notepad',
             'open_calculator', 'open_cmd', 'open_powershell', 'lock', 'sleep', 'hibernate',
             'restart', 'shutdown', 'volume_up', 'volume_down', 'volume_mute',
-            'show_desktop', 'empty_recycle_bin',
+            'show_desktop', 'empty_recycle_bin', 'open_screensaver', 'switch_display',
+            'toggle_wifi', 'toggle_bluetooth', 'set_brightness',
           ],
           description: 'The pre-stored action to run.',
         },
         target: { type: 'string', description: 'For action "open": the URL, file path, or executable to open.' },
+        brightness: { type: 'integer', description: 'For action "set_brightness": brightness level 0-100.', minimum: 0, maximum: 100 },
       },
     },
     output: textOutput({ type: 'object', additionalProperties: true }),
     async execute(args, exec) {
       const env = { SM_ACTION: args.action };
       if (args.target !== undefined) env.SM_TARGET = String(args.target);
+      if (args.brightness !== undefined) env.SM_BRIGHTNESS = String(toInt(args.brightness, 'brightness', 50));
       return runPowerShell(SHORTCUTS_PS1, env, exec.signal);
     },
   };
