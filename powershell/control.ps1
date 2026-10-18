@@ -5,6 +5,8 @@
 # Emits exactly one JSON object on stdout.
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $SM_ACTION = $env:SM_ACTION
 if (-not $SM_ACTION) { $SM_ACTION = 'info' }

@@ -3,6 +3,8 @@
 # Dispatched by SM_ACTION. Emits exactly one JSON object on stdout.
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $action = $env:SM_ACTION
 if (-not $action) { $action = 'ocr' }
 

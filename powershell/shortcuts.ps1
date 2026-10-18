@@ -3,6 +3,8 @@
 # Dispatched by SM_ACTION; args via SM_TARGET / SM_TEXT / SM_KEYS env vars.
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $action = $env:SM_ACTION
 if (-not $action) { $action = 'open' }
 

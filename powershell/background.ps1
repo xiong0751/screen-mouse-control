@@ -5,6 +5,8 @@
 # Dispatched by SM_ACTION; args via SM_* env vars.
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $action = $env:SM_ACTION
 if (-not $action) { $action = 'list' }
 
