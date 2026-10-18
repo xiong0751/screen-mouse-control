@@ -242,11 +242,10 @@ function Do-Type {
     return
   }
 
-  # 3) Renderer-hosted inputs (e.g. Chromium <textarea>): UIA-focus the element,
-  #    then post WM_CHAR to the window under it. No foreground input is injected.
+  # 3) Renderer-hosted inputs (e.g. Chromium <textarea>): post WM_CHAR to the
+  #    window under the element. Never calls SetFocus, so the target window is
+  #    not activated; if it is already focused the chars land, otherwise no-op.
   try {
-    $el.SetFocus()
-    Start-Sleep -Milliseconds 100
     $r = $el.Current.BoundingRectangle
     $pt = New-Object BgWin32+POINT
     $pt.X = [int]($r.X + $r.Width / 2)
