@@ -19,6 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTROL_PS1 = join(HERE, 'powershell', 'control.ps1');
 const VISION_PS1 = join(HERE, 'powershell', 'vision.ps1');
 const SHORTCUTS_PS1 = join(HERE, 'powershell', 'shortcuts.ps1');
+const BACKGROUND_PS1 = join(HERE, 'powershell', 'background.ps1');
 
 export const inject = ['tools', 'attachments'];
 
@@ -665,6 +666,139 @@ function clipboardGetTool() {
   };
 }
 
+function bgListWindowsTool() {
+  return {
+    name: 'bg_list_windows',
+    description: 'List top-level windows (pid, process, title, rectangle) in the background, without taking a screenshot.',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(_args, exec) {
+      return runPowerShell(BACKGROUND_PS1, { SM_ACTION: 'list' }, exec.signal);
+    },
+  };
+}
+
+function bgFindTool() {
+  return {
+    name: 'bg_find',
+    description:
+      'Find UI Automation elements inside a window by name/type/automationId/className and return their rectangles. ' +
+      'Reads the UI tree in the background; no screenshot and no foreground input.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['window'],
+      properties: {
+        window: { type: 'string', description: 'Window target: title substring, process name, or PID.' },
+        name: { type: 'string', description: 'Case-insensitive substring of the element name.' },
+        type: { type: 'string', description: 'Control type substring (Button, Edit, Text, ListItem, MenuItem, ...).' },
+        automationId: { type: 'string' },
+        className: { type: 'string' },
+        limit: { type: 'integer', description: 'Max elements to return. Default 50.', default: 50 },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      const env = { SM_ACTION: 'find', SM_WINDOW: String(args.window) };
+      if (args.name !== undefined) env.SM_NAME = String(args.name);
+      if (args.type !== undefined) env.SM_TYPE = String(args.type);
+      if (args.automationId !== undefined) env.SM_AUTOMATION_ID = String(args.automationId);
+      if (args.className !== undefined) env.SM_CLASS = String(args.className);
+      if (args.limit !== undefined) env.SM_LIMIT = String(toInt(args.limit, 'limit', 50));
+      return runPowerShell(BACKGROUND_PS1, env, exec.signal);
+    },
+  };
+}
+
+function bgReadTool() {
+  return {
+    name: 'bg_read',
+    description: 'Read text from a window or one element via UI Automation (ValuePattern/TextPattern/Name). No screenshot.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['window'],
+      properties: {
+        window: { type: 'string', description: 'Window target: title substring, process name, or PID.' },
+        name: { type: 'string' },
+        type: { type: 'string' },
+        automationId: { type: 'string' },
+        className: { type: 'string' },
+        index: { type: 'integer', description: '0-based index among matches. Default 0.', default: 0 },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(_args, value) {
+        if (value && value.ok) return [textBlock(value.text)];
+        return [textBlock(JSON.stringify(value))];
+      },
+    },
+    async execute(args, exec) {
+      const env = { SM_ACTION: 'read', SM_WINDOW: String(args.window) };
+      if (args.name !== undefined) env.SM_NAME = String(args.name);
+      if (args.type !== undefined) env.SM_TYPE = String(args.type);
+      if (args.automationId !== undefined) env.SM_AUTOMATION_ID = String(args.automationId);
+      if (args.className !== undefined) env.SM_CLASS = String(args.className);
+      if (args.index !== undefined) env.SM_INDEX = String(toInt(args.index, 'index', 0));
+      return runPowerShell(BACKGROUND_PS1, env, exec.signal);
+    },
+  };
+}
+
+function bgActTool() {
+  return {
+    name: 'bg_act',
+    description:
+      'Perform a background action on a window/element: click, type, keys (shortcut), scroll, or window ops ' +
+      '(move/resize/minimize/maximize/restore/close/topmost). Messages are delivered to the window; the cursor is never moved and no foreground input is injected.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action', 'window'],
+      properties: {
+        action: { type: 'string', enum: ['click', 'type', 'keys', 'scroll', 'window'], description: 'Action to perform.' },
+        window: { type: 'string', description: 'Window target: title substring, process name, or PID.' },
+        name: { type: 'string' },
+        type: { type: 'string' },
+        automationId: { type: 'string' },
+        className: { type: 'string' },
+        index: { type: 'integer', description: '0-based index among matches. Default 0.', default: 0 },
+        x: { type: 'integer', description: 'For click: client x when no element matched.' },
+        y: { type: 'integer' },
+        button: { type: 'string', enum: ['left', 'right'], description: 'For click. Default left.', default: 'left' },
+        text: { type: 'string', description: 'For type.' },
+        keys: { type: 'string', description: 'For keys: e.g. "ctrl+s", "enter", "alt+tab".' },
+        amount: { type: 'integer', description: 'For scroll: wheel clicks (negative = down).' },
+        op: { type: 'string', enum: ['move', 'resize', 'minimize', 'maximize', 'restore', 'close', 'topmost'], description: 'For window.' },
+        width: { type: 'integer' },
+        height: { type: 'integer' },
+        on: { type: 'boolean', description: 'For window topmost: pin on/off. Default true.', default: true },
+      },
+    },
+    output: textOutput({ type: 'object', additionalProperties: true }),
+    async execute(args, exec) {
+      const env = { SM_ACTION: args.action, SM_WINDOW: String(args.window) };
+      if (args.name !== undefined) env.SM_NAME = String(args.name);
+      if (args.type !== undefined) env.SM_TYPE = String(args.type);
+      if (args.automationId !== undefined) env.SM_AUTOMATION_ID = String(args.automationId);
+      if (args.className !== undefined) env.SM_CLASS = String(args.className);
+      if (args.index !== undefined) env.SM_INDEX = String(toInt(args.index, 'index', 0));
+      if (args.x !== undefined) env.SM_X = String(toInt(args.x, 'x', 0));
+      if (args.y !== undefined) env.SM_Y = String(toInt(args.y, 'y', 0));
+      if (args.button !== undefined) env.SM_BUTTON = args.button;
+      if (args.text !== undefined) env.SM_TEXT = String(args.text);
+      if (args.keys !== undefined) env.SM_KEYS = String(args.keys);
+      if (args.amount !== undefined) env.SM_AMOUNT = String(toInt(args.amount, 'amount', 0));
+      if (args.op !== undefined) env.SM_OP = String(args.op);
+      if (args.width !== undefined) env.SM_WIDTH = String(toInt(args.width, 'width', 0));
+      if (args.height !== undefined) env.SM_HEIGHT = String(toInt(args.height, 'height', 0));
+      if (args.on !== undefined) env.SM_ON = args.on ? '1' : '0';
+      return runPowerShell(BACKGROUND_PS1, env, exec.signal);
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // apply
 // ---------------------------------------------------------------------------
@@ -685,6 +819,10 @@ export function apply(ctx) {
     ctx.tools.register(pressKeysTool()),
     ctx.tools.register(clipboardSetTool()),
     ctx.tools.register(clipboardGetTool()),
+    ctx.tools.register(bgListWindowsTool()),
+    ctx.tools.register(bgFindTool()),
+    ctx.tools.register(bgReadTool()),
+    ctx.tools.register(bgActTool()),
   ];
   return () => {
     for (const dispose of disposers) dispose();
