@@ -29,6 +29,7 @@ public class BgWin32 {
   [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT pt);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, string lParam);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
@@ -87,6 +88,12 @@ function Select-Elements($all, [string]$name, [string]$type, [string]$aid, [stri
       if ($cls -and -not ([string]$cur.ClassName -like "*$cls*")) { continue }
       $res += $el
     } catch { }
+  }
+  # An automation id is an identifier: when an exact match exists, prefer it over
+  # loose substring hits (e.g. "area" must not also match "RootWebArea").
+  if ($aid -and $res.Count -gt 1) {
+    $exact = @($res | Where-Object { [string]$_.Current.AutomationId -eq $aid })
+    if ($exact.Count -gt 0) { return $exact }
   }
   return $res
 }
@@ -216,6 +223,8 @@ function Do-Type {
   if ($sel.Count -eq 0) { throw 'Target element not found (run bg_find to locate an edit control)' }
   $idx = 0; if ($env:SM_INDEX) { $idx = [int]$env:SM_INDEX }
   $el = $sel[$idx]
+
+  # 1) ValuePattern first (fast path, keeps the window untouched)
   try {
     $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     if (-not $vp.Current.IsReadOnly) {
@@ -224,12 +233,35 @@ function Do-Type {
       return
     }
   } catch { }
+
+  # 2) WM_SETTEXT to the element's own native window handle (classic Edit controls)
   $eh = [int]$el.Current.NativeWindowHandle
   if ($eh -ne 0) {
     [BgWin32]::SendMessage([IntPtr]$eh, 0x000C, [IntPtr]0, $text) | Out-Null
     Write-Result @{ ok = $true; via = 'wm_settext'; element = [string]$el.Current.Name }
     return
   }
+
+  # 3) Renderer-hosted inputs (e.g. Chromium <textarea>): UIA-focus the element,
+  #    then post WM_CHAR to the window under it. No foreground input is injected.
+  try {
+    $el.SetFocus()
+    Start-Sleep -Milliseconds 100
+    $r = $el.Current.BoundingRectangle
+    $pt = New-Object BgWin32+POINT
+    $pt.X = [int]($r.X + $r.Width / 2)
+    $pt.Y = [int]($r.Y + $r.Height / 2)
+    $wh = [BgWin32]::WindowFromPoint($pt)
+    if ($wh -eq [IntPtr]::Zero) { throw 'No window under the element' }
+    $norm = ($text -replace "`r`n", "`r") -replace "`n", "`r"
+    foreach ($ch in $norm.ToCharArray()) {
+      [BgWin32]::PostMessage($wh, 0x0102, [IntPtr][int]$ch, [IntPtr]0) | Out-Null
+      Start-Sleep -Milliseconds 15
+    }
+    Write-Result @{ ok = $true; via = 'wm_char'; element = [string]$el.Current.Name; hwnd = [int]$wh; len = $text.Length }
+    return
+  } catch { }
+
   throw 'Cannot type into this element in background mode'
 }
 
